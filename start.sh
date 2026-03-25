@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Cursor2API Go版本启动脚本
+#  Cursor2API启动脚本
 
 set -e
 
@@ -18,7 +18,7 @@ NC='\033[0m' # No Color
 print_header() {
     echo ""
     echo -e "${CYAN}=========================================${NC}"
-    echo -e "${WHITE}    🚀 Cursor2API Go版本启动器${NC}"
+    echo -e "${WHITE}    🚀  Cursor2API启动器${NC}"
     echo -e "${CYAN}=========================================${NC}"
 }
 
@@ -31,7 +31,7 @@ check_go() {
     fi
 
     GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
-    REQUIRED_VERSION="1.21"
+    REQUIRED_VERSION="1.24"
 
     if [ "$(printf '%s\n' "$REQUIRED_VERSION" "$GO_VERSION" | sort -V | head -n1)" != "$REQUIRED_VERSION" ]; then
         echo -e "${RED}❌ Go 版本 $GO_VERSION 过低，请安装 Go $REQUIRED_VERSION 或更高版本${NC}"
@@ -67,11 +67,11 @@ setup_env() {
         cat > .env << EOF
 # 服务器配置
 PORT=8002
-DEBUG=true
+DEBUG=false
 
 # API配置
 API_KEY=0000
-MODELS=gpt-5,gpt-5-codex,gpt-5-mini,gpt-5-nano,gpt-4.1,gpt-4o,claude-3.5-sonnet,claude-3.5-haiku,claude-3.7-sonnet,claude-4-sonnet,claude-4.5-sonnet,claude-4-opus,claude-4.1-opus,gemini-2.5-pro,gemini-2.5-flash,o3,o4-mini,deepseek-r1,deepseek-v3.1,kimi-k2-instruct,grok-3,grok-3-mini,grok-4,code-supernova-1-million
+MODELS=claude-sonnet-4.6
 SYSTEM_PROMPT_INJECT=
 
 # 请求配置
@@ -105,36 +105,8 @@ build_app() {
 
 # 显示服务信息
 show_info() {
-    # 获取配置信息
-    PORT=$(grep -E '^PORT=' .env 2>/dev/null | cut -d'=' -f2 | tr -d ' ' || echo "8002")
-    API_KEY=$(grep -E '^API_KEY=' .env 2>/dev/null | cut -d'=' -f2 | tr -d ' ' || echo "0000")
-
     echo ""
-    echo -e "${PURPLE}🚀 服务启动信息:${NC}"
-    echo -e "  ${WHITE}服务器地址:${NC} ${CYAN}http://127.0.0.1:${PORT}${NC}"
-    echo -e "  ${WHITE}在线文档:${NC} ${CYAN}http://127.0.0.1:${PORT}${NC}"
-    echo -e "  ${WHITE}API密钥:${NC} ${YELLOW}${API_KEY}${NC}"
-    echo ""
-
-    echo -e "${PURPLE}📡 支持的接口:${NC}"
-    echo -e "  ${GREEN}GET${NC}    ${WHITE}/${NC} - API文档页面"
-    echo -e "  ${GREEN}GET${NC}    ${WHITE}/v1/models${NC} - 获取模型列表"
-    echo -e "  ${BLUE}POST${NC}   ${WHITE}/v1/chat/completions${NC} - 聊天完成"
-    echo -e "  ${GREEN}GET${NC}    ${WHITE}/health${NC} - 健康检查"
-    echo ""
-
-    echo -e "${PURPLE}🤖 支持的模型 (24个):${NC}"
-    echo "  - gpt-5, gpt-5-codex, gpt-5-mini, gpt-5-nano"
-    echo "  - gpt-4.1, gpt-4o, o3, o4-mini"
-    echo "  - claude-3.5-sonnet, claude-3.5-haiku, claude-3.7-sonnet"
-    echo "  - claude-4-sonnet, claude-4.5-sonnet, claude-4-opus, claude-4.1-opus"
-    echo "  - gemini-2.5-pro, gemini-2.5-flash"
-    echo "  - deepseek-r1, deepseek-v3.1, kimi-k2-instruct"
-    echo "  - grok-3, grok-3-mini, grok-4, code-supernova-1-million"
-
-    echo ""
-    echo -e "${GREEN}🟢 正在启动服务器...${NC}"
-    echo -e "${CYAN}=========================================${NC}"
+    echo -e "${GREEN}✅ 准备就绪，正在启动服务...${NC}"
     echo ""
 }
 
@@ -146,12 +118,36 @@ start_server() {
     ./cursor2api-go
 }
 
+# 检查端口占用并在需要时清理
+check_port() {
+    # 如果 .env 存在，从中获取端口号，否则使用默认值 8002
+    PORT_TO_CHECK=8002
+    if [ -f .env ]; then
+        ENV_PORT=$(grep "^PORT=" .env | cut -d '=' -f2)
+        if [ ! -z "$ENV_PORT" ]; then
+            PORT_TO_CHECK=$ENV_PORT
+        fi
+    fi
+
+    # 检查是否有进程占用该端口
+    if command -v lsof &> /dev/null; then
+        PID=$(lsof -t -i :$PORT_TO_CHECK)
+        if [ ! -z "$PID" ]; then
+            echo -e "${YELLOW}⚠️  检测到端口 $PORT_TO_CHECK 已被占用 (PID: $PID)，正在清理...${NC}"
+            kill -9 $PID &> /dev/null || true
+            sleep 1
+            echo -e "${GREEN}✅ 端口 $PORT_TO_CHECK 已清理${NC}"
+        fi
+    fi
+}
+
 # 主函数
 main() {
     print_header
     check_go
     check_nodejs
     setup_env
+    check_port
     build_app
     show_info
     start_server

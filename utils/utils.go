@@ -1,3 +1,23 @@
+// Copyright (c) 2025-2026 libaxuan
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 package utils
 
 import (
@@ -11,9 +31,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -79,7 +97,8 @@ func WriteSSEEvent(w http.ResponseWriter, event, data string) error {
 }
 
 // StreamChatCompletion 处理流式聊天完成
-func StreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}) {
+// StreamChatCompletion 处理流式聊天完成
+func StreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}, modelName string) {
 	// 设置SSE头
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -88,6 +107,15 @@ func StreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}) {
 
 	// 生成响应ID
 	responseID := GenerateChatCompletionID()
+	started := false
+	toolCallIndex := 0
+
+	writeChunk := func(delta models.StreamDelta, finishReason *string) {
+		streamResp := models.NewChatCompletionStreamResponse(responseID, modelName, delta, finishReason)
+		if jsonData, err := json.Marshal(streamResp); err == nil {
+			WriteSSEEvent(c.Writer, "", string(jsonData))
+		}
+	}
 
 	// 处理流式数据
 	ctx := c.Request.Context()
@@ -100,22 +128,52 @@ func StreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}) {
 		case data, ok := <-chatGenerator:
 			if !ok {
 				// 通道关闭，发送完成事件
-				finishEvent := models.NewChatCompletionStreamResponse(responseID, "gpt-4o", "", stringPtr("stop"))
-				if jsonData, err := json.Marshal(finishEvent); err == nil {
-					WriteSSEEvent(c.Writer, "", string(jsonData))
+				reason := "stop"
+				if toolCallIndex > 0 {
+					reason = "tool_calls"
 				}
+				writeChunk(models.StreamDelta{}, stringPtr(reason))
 				WriteSSEEvent(c.Writer, "", "[DONE]")
 				return
 			}
 
 			switch v := data.(type) {
-			case string:
-				// 文本内容
-				if v != "" {
-					streamResp := models.NewChatCompletionStreamResponse(responseID, "gpt-4o", v, nil)
-					if jsonData, err := json.Marshal(streamResp); err == nil {
-						WriteSSEEvent(c.Writer, "", string(jsonData))
+			case models.AssistantEvent:
+				if !started {
+					writeChunk(models.StreamDelta{Role: "assistant"}, nil)
+					started = true
+				}
+
+				switch v.Kind {
+				case models.AssistantEventText:
+					if v.Text != "" {
+						writeChunk(models.StreamDelta{Content: v.Text}, nil)
 					}
+				case models.AssistantEventToolCall:
+					if v.ToolCall != nil {
+						writeChunk(models.StreamDelta{
+							ToolCalls: []models.ToolCallDelta{
+								{
+									Index: toolCallIndex,
+									ID:    v.ToolCall.ID,
+									Type:  v.ToolCall.Type,
+									Function: &models.FunctionCallDelta{
+										Name:      v.ToolCall.Function.Name,
+										Arguments: v.ToolCall.Function.Arguments,
+									},
+								},
+							},
+						}, nil)
+						toolCallIndex++
+					}
+				}
+			case string:
+				if !started {
+					writeChunk(models.StreamDelta{Role: "assistant"}, nil)
+					started = true
+				}
+				if v != "" {
+					writeChunk(models.StreamDelta{Content: v}, nil)
 				}
 
 			case models.Usage:
@@ -135,9 +193,11 @@ func StreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}) {
 }
 
 // NonStreamChatCompletion 处理非流式聊天完成
-func NonStreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}) {
+func NonStreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}, modelName string) {
 	var fullContent strings.Builder
 	var usage models.Usage
+	toolCalls := make([]models.ToolCall, 0, 2)
+	finishReason := "stop"
 
 	// 收集所有数据
 	ctx := c.Request.Context()
@@ -155,10 +215,21 @@ func NonStreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}) {
 			if !ok {
 				// 数据收集完成，返回响应
 				responseID := GenerateChatCompletionID()
+				message := models.Message{
+					Role: "assistant",
+				}
+				if fullContent.Len() > 0 || len(toolCalls) == 0 {
+					message.Content = fullContent.String()
+				}
+				if len(toolCalls) > 0 {
+					message.ToolCalls = toolCalls
+					finishReason = "tool_calls"
+				}
 				response := models.NewChatCompletionResponse(
 					responseID,
-					"gpt-4o",
-					fullContent.String(),
+					modelName,
+					message,
+					finishReason,
 					usage,
 				)
 				c.JSON(http.StatusOK, response)
@@ -166,6 +237,15 @@ func NonStreamChatCompletion(c *gin.Context, chatGenerator <-chan interface{}) {
 			}
 
 			switch v := data.(type) {
+			case models.AssistantEvent:
+				switch v.Kind {
+				case models.AssistantEventText:
+					fullContent.WriteString(v.Text)
+				case models.AssistantEventToolCall:
+					if v.ToolCall != nil {
+						toolCalls = append(toolCalls, *v.ToolCall)
+					}
+				}
 			case string:
 				fullContent.WriteString(v)
 			case models.Usage:
@@ -196,7 +276,7 @@ func ErrorWrapper(handler func(*gin.Context) error) gin.HandlerFunc {
 }
 
 // SafeStreamWrapper 安全流式包装器
-func SafeStreamWrapper(handler func(*gin.Context, <-chan interface{}), c *gin.Context, chatGenerator <-chan interface{}) {
+func SafeStreamWrapper(handler func(*gin.Context, <-chan interface{}, string), c *gin.Context, chatGenerator <-chan interface{}, modelName string) {
 	defer func() {
 		if r := recover(); r != nil {
 			logrus.WithField("panic", r).Error("Panic in stream handler")
@@ -244,7 +324,7 @@ func SafeStreamWrapper(handler func(*gin.Context, <-chan interface{}), c *gin.Co
 		}
 	}()
 
-	handler(c, buffered)
+	handler(c, buffered, modelName)
 }
 
 // CreateHTTPClient 创建HTTP客户端
@@ -252,6 +332,7 @@ func CreateHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
@@ -377,22 +458,9 @@ func ReadRequestBody(r *http.Request) ([]byte, error) {
 
 // RunJS 执行JavaScript代码并返回标准输出内容
 func RunJS(jsCode string) (string, error) {
-	// 创建临时目录
-	tempDir, err := os.MkdirTemp("", "cursor_js_*")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp dir: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// 创建JavaScript文件
-	jsFilePath := filepath.Join(tempDir, "script.js")
-	file, err := os.Create(jsFilePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create js file: %w", err)
-	}
-
 	// 添加crypto模块导入并设置为全局变量
-	jsContent := `const crypto = require('crypto').webcrypto;
+	// 注意：使用stdin时，我们需要确保代码是自包含的
+	finalJS := `const crypto = require('crypto').webcrypto;
 global.crypto = crypto;
 globalThis.crypto = crypto;
 // 在Node.js环境中创建window对象
@@ -401,14 +469,12 @@ window.crypto = crypto;
 this.crypto = crypto;
 ` + jsCode
 
-	if _, err := file.WriteString(jsContent); err != nil {
-		file.Close()
-		return "", fmt.Errorf("failed to write js content: %w", err)
-	}
-	file.Close()
+	// 执行Node.js命令，使用stdin输入代码
+	cmd := exec.Command("node")
 
-	// 执行Node.js命令
-	cmd := exec.Command("node", jsFilePath)
+	// 设置输入
+	cmd.Stdin = strings.NewReader(finalJS)
+
 	output, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

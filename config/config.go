@@ -1,6 +1,27 @@
+// Copyright (c) 2025-2026 libaxuan
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 package config
 
 import (
+	"cursor2api-go/models"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,6 +44,11 @@ type Config struct {
 	SystemPromptInject string `json:"system_prompt_inject"`
 	Timeout            int    `json:"timeout"`
 	MaxInputLength     int    `json:"max_input_length"`
+
+	// 兼容性配置
+	// KILO_TOOL_STRICT=true 时：只要请求提供了 tools，就强制/强提示模型至少发起一次工具调用
+	// 以适配 Kilo Code 这类“必须用工具”的上层编排器。
+	KiloToolStrict bool `json:"kilo_tool_strict"`
 
 	// Cursor相关配置
 	ScriptURL string `json:"script_url"`
@@ -48,10 +74,11 @@ func LoadConfig() (*Config, error) {
 		Port:               getEnvAsInt("PORT", 8002),
 		Debug:              getEnvAsBool("DEBUG", false),
 		APIKey:             getEnv("API_KEY", "0000"),
-		Models:             getEnv("MODELS", "gpt-4o,claude-3.5-sonnet"),
+		Models:             getEnv("MODELS", "anthropic/claude-sonnet-4.6,claude-sonnet-4-5-20250929,claude-sonnet-4-20250514,claude-3-5-sonnet-20241022"),
 		SystemPromptInject: getEnv("SYSTEM_PROMPT_INJECT", ""),
-		Timeout:            getEnvAsInt("TIMEOUT", 30),
+		Timeout:            getEnvAsInt("TIMEOUT", 60),
 		MaxInputLength:     getEnvAsInt("MAX_INPUT_LENGTH", 200000),
+		KiloToolStrict:     getEnvAsBool("KILO_TOOL_STRICT", false),
 		ScriptURL:          getEnv("SCRIPT_URL", "https://cursor.com/_next/static/chunks/pages/_app.js"),
 		FP: FP{
 			UserAgent:               getEnv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"),
@@ -89,16 +116,21 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// GetModels 获取模型列表
-func (c *Config) GetModels() []string {
-	models := strings.Split(c.Models, ",")
-	result := make([]string, 0, len(models))
-	for _, model := range models {
+// GetBaseModels 获取基础模型列表
+func (c *Config) GetBaseModels() []string {
+	modelsList := strings.Split(c.Models, ",")
+	result := make([]string, 0, len(modelsList))
+	for _, model := range modelsList {
 		if trimmed := strings.TrimSpace(model); trimmed != "" {
 			result = append(result, trimmed)
 		}
 	}
 	return result
+}
+
+// GetModels 获取模型列表
+func (c *Config) GetModels() []string {
+	return models.ExpandModelList(c.GetBaseModels())
 }
 
 // IsValidModel 检查模型是否有效

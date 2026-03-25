@@ -1,3 +1,23 @@
+// Copyright (c) 2025-2026 libaxuan
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 package middleware
 
 import (
@@ -70,13 +90,21 @@ func handleError(c *gin.Context, err error) {
 		if e.Type == gin.ErrorTypePublic {
 			statusCode = http.StatusInternalServerError
 		}
-		
+
 		errorResponse := models.NewErrorResponse(
 			e.Error(),
 			"validation_error",
 			"invalid_request",
 		)
 		c.JSON(statusCode, errorResponse)
+
+	case *RequestValidationError:
+		errorResponse := models.NewErrorResponse(
+			e.Message,
+			"invalid_request_error",
+			e.Code,
+		)
+		c.JSON(http.StatusBadRequest, errorResponse)
 
 	default:
 		// 处理其他错误
@@ -89,15 +117,34 @@ func handleError(c *gin.Context, err error) {
 	}
 }
 
+// RequestValidationError 请求参数验证错误
+type RequestValidationError struct {
+	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
+}
+
+// Error 实现 error 接口
+func (e *RequestValidationError) Error() string {
+	return e.Message
+}
+
+// NewRequestValidationError 创建请求参数验证错误
+func NewRequestValidationError(message, code string) *RequestValidationError {
+	return &RequestValidationError{
+		Message: message,
+		Code:    code,
+	}
+}
+
 // RecoveryHandler 自定义恢复中间件
 func RecoveryHandler() gin.HandlerFunc {
 	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
 		logrus.WithField("panic", recovered).Error("Panic occurred")
-		
+
 		if c.Writer.Written() {
 			return
 		}
-		
+
 		errorResponse := models.NewErrorResponse(
 			"Internal server error",
 			"panic_error",
@@ -150,8 +197,8 @@ func NewAuthenticationError(message string) *AuthenticationError {
 
 // RateLimitError 限流错误
 type RateLimitError struct {
-	Message     string `json:"message"`
-	RetryAfter  int    `json:"retry_after"`
+	Message    string `json:"message"`
+	RetryAfter int    `json:"retry_after"`
 }
 
 // Error 实现error接口

@@ -5,10 +5,12 @@ import (
 	"cursor2api-go/config"
 	"cursor2api-go/handlers"
 	"cursor2api-go/middleware"
+	"cursor2api-go/models"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,22 +25,29 @@ func main() {
 		logrus.Fatalf("Failed to load config: %v", err)
 	}
 
-	// 设置日志级别
+	// 设置日志级别和 GIN 模式（必须在创建路由器之前设置）
 	if cfg.Debug {
 		logrus.SetLevel(logrus.DebugLevel)
 		gin.SetMode(gin.DebugMode)
 	} else {
+		logrus.SetLevel(logrus.InfoLevel)
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// 创建路由器
+	// 禁用 Gin 的调试信息输出
+	gin.DisableConsoleColor()
+	
+	// 创建路由器（使用 gin.New() 而不是 gin.Default() 以避免默认日志）
 	router := gin.New()
 
 	// 添加中间件
-	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 	router.Use(middleware.CORS())
 	router.Use(middleware.ErrorHandler())
+	// 只在 Debug 模式下启用 GIN 的日志
+	if cfg.Debug {
+		router.Use(gin.Logger())
+	}
 
 	// 创建处理器
 	handler := handlers.NewHandler(cfg)
@@ -52,9 +61,11 @@ func main() {
 		Handler: router,
 	}
 
+	// 打印启动信息
+	printStartupBanner(cfg)
+
 	// 启动服务器的goroutine
 	go func() {
-		logrus.Infof("Starting Cursor2API server on port %d", cfg.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logrus.Fatalf("Failed to start server: %v", err)
 		}
@@ -92,7 +103,7 @@ func setupRoutes(router *gin.Engine, handler *handlers.Handler) {
 	v1 := router.Group("/v1")
 	{
 		// 模型列表
-		v1.GET("/models", middleware.AuthRequired(), handler.ListModels)
+		v1.GET("/models", handler.ListModels) // 模型列表不需要鉴权
 
 		// 聊天完成
 		v1.POST("/chat/completions", middleware.AuthRequired(), handler.ChatCompletions)
@@ -100,4 +111,54 @@ func setupRoutes(router *gin.Engine, handler *handlers.Handler) {
 
 	// 静态文件服务（如果需要）
 	router.Static("/static", "./static")
+}
+
+// printStartupBanner 打印启动横幅
+func printStartupBanner(cfg *config.Config) {
+	banner := `
+╔══════════════════════════════════════════════════════════════╗
+║                      Cursor2API Server                       ║
+╚══════════════════════════════════════════════════════════════╝
+`
+	fmt.Println(banner)
+
+	fmt.Printf("🚀 服务地址:  http://localhost:%d\n", cfg.Port)
+	fmt.Printf("📚 API 文档:  http://localhost:%d/\n", cfg.Port)
+	fmt.Printf("💊 健康检查:  http://localhost:%d/health\n", cfg.Port)
+	fmt.Printf("🔑 API 密钥:  %s\n", maskAPIKey(cfg.APIKey))
+
+	modelList := cfg.GetModels()
+	fmt.Printf("\n🤖 支持模型 (%d 个):\n", len(modelList))
+
+	// 按类别分组显示模型
+	providers := make(map[string][]string)
+	for _, modelID := range modelList {
+		if config, exists := models.GetModelConfig(modelID); exists {
+			providers[config.Provider] = append(providers[config.Provider], modelID)
+		} else {
+			providers["Other"] = append(providers["Other"], modelID)
+		}
+	}
+
+	// 按Provider排序并显示
+	for _, provider := range []string{"Anthropic", "OpenAI", "Google", "Other"} {
+		if models, ok := providers[provider]; ok && len(models) > 0 {
+			fmt.Printf("   %s:  %s\n", provider, strings.Join(models, ", "))
+		}
+	}
+
+	if cfg.Debug {
+		fmt.Println("\n🐛 调试模式:  已启用")
+	}
+
+	fmt.Println("\n✨ 服务已启动，按 Ctrl+C 停止")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+}
+
+// maskAPIKey 掩码 API 密钥，只显示前 4 位
+func maskAPIKey(key string) string {
+	if len(key) <= 4 {
+		return "****"
+	}
+	return key[:4] + "****"
 }

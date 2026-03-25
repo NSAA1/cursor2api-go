@@ -1,3 +1,23 @@
+// Copyright (c) 2025-2026 libaxuan
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 package handlers
 
 import (
@@ -18,95 +38,21 @@ import (
 type Handler struct {
 	config        *config.Config
 	cursorService *services.CursorService
+	docsContent   []byte
 }
 
 // NewHandler 创建新的处理器
 func NewHandler(cfg *config.Config) *Handler {
 	cursorService := services.NewCursorService(cfg)
 
-	return &Handler{
-		config:        cfg,
-		cursorService: cursorService,
-	}
-}
-
-// ListModels 列出可用模型
-func (h *Handler) ListModels(c *gin.Context) {
-	modelNames := h.config.GetModels()
-	modelList := make([]models.Model, 0, len(modelNames))
-
-	for _, modelID := range modelNames {
-		modelList = append(modelList, models.Model{
-			ID:      modelID,
-			Object:  "model",
-			Created: time.Now().Unix(),
-			OwnedBy: "cursor2api",
-		})
-	}
-
-	response := models.ModelsResponse{
-		Object: "list",
-		Data:   modelList,
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
-// ChatCompletions 处理聊天完成请求
-func (h *Handler) ChatCompletions(c *gin.Context) {
-	var request models.ChatCompletionRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		logrus.WithError(err).Error("Failed to bind request")
-		c.JSON(http.StatusBadRequest, models.NewErrorResponse(
-			"Invalid request format",
-			"invalid_request_error",
-			"invalid_json",
-		))
-		return
-	}
-
-	// 验证模型
-	if !h.config.IsValidModel(request.Model) {
-		c.JSON(http.StatusBadRequest, models.NewErrorResponse(
-			"Invalid model specified",
-			"invalid_request_error",
-			"model_not_found",
-		))
-		return
-	}
-
-	// 验证消息
-	if len(request.Messages) == 0 {
-		c.JSON(http.StatusBadRequest, models.NewErrorResponse(
-			"Messages cannot be empty",
-			"invalid_request_error",
-			"missing_messages",
-		))
-		return
-	}
-
-	// 调用Cursor服务
-	chatGenerator, err := h.cursorService.ChatCompletion(c.Request.Context(), &request)
-	if err != nil {
-		logrus.WithError(err).Error("Failed to create chat completion")
-		middleware.HandleError(c, err)
-		return
-	}
-
-	// 根据是否流式返回不同响应
-	if request.Stream {
-		utils.SafeStreamWrapper(utils.StreamChatCompletion, c, chatGenerator)
-	} else {
-		utils.NonStreamChatCompletion(c, chatGenerator)
-	}
-}
-
-// ServeDocs 服务API文档页面
-func (h *Handler) ServeDocs(c *gin.Context) {
-	// 尝试读取docs.html文件
+	// 预加载文档内容
 	docsPath := "static/docs.html"
-	if _, err := os.Stat(docsPath); os.IsNotExist(err) {
-		// 如果文件不存在，返回简单的HTML页面
+	var docsContent []byte
+
+	if data, err := os.ReadFile(docsPath); err == nil {
+		docsContent = data
+	} else {
+		// 如果文件不存在，使用默认的简单HTML页面
 		simpleHTML := `
 <!DOCTYPE html>
 <html lang="en">
@@ -166,7 +112,7 @@ func (h *Handler) ServeDocs(c *gin.Context) {
         <div class="info">
             <p><strong>Status:</strong> <span class="status-ok">✅ Running</span></p>
             <p><strong>Version:</strong> Go Implementation</p>
-            <p><strong>Description:</strong> OpenAI-compatible API proxy for Cursor AI</p>
+            <p><strong>Description:</strong> OpenAI-compatible chat completions proxy for Cursor AI</p>
         </div>
         
         <div class="info">
@@ -177,7 +123,7 @@ func (h *Handler) ServeDocs(c *gin.Context) {
             </div>
             <div class="endpoint">
                 <strong>POST</strong> <code>/v1/chat/completions</code><br>
-                <small>Create chat completion (supports streaming)</small>
+                <small>Create chat completion (supports streaming and tool calls)</small>
             </div>
             <div class="endpoint">
                 <strong>GET</strong> <code>/health</code><br>
@@ -198,10 +144,11 @@ func (h *Handler) ServeDocs(c *gin.Context) {
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer 0000" \
   -d '{
-    "model": "gpt-4o",
+    "model": "claude-sonnet-4.6-thinking",
     "messages": [
-      {"role": "user", "content": "Hello!"}
-    ]
+      {"role": "user", "content": "Plan first, then decide whether a tool is needed."}
+    ],
+    "stream": true
   }'</code></pre>
         </div>
         
@@ -212,12 +159,110 @@ func (h *Handler) ServeDocs(c *gin.Context) {
     </div>
 </body>
 </html>`
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(simpleHTML))
+		docsContent = []byte(simpleHTML)
+	}
+
+	return &Handler{
+		config:        cfg,
+		cursorService: cursorService,
+		docsContent:   docsContent,
+	}
+
+}
+
+// ListModels 列出可用模型
+func (h *Handler) ListModels(c *gin.Context) {
+	modelNames := h.config.GetModels()
+	modelList := make([]models.Model, 0, len(modelNames))
+
+	for _, modelID := range modelNames {
+		// 获取模型配置信息
+		modelConfig, exists := models.GetModelConfig(modelID)
+
+		model := models.Model{
+			ID:      modelID,
+			Object:  "model",
+			Created: time.Now().Unix(),
+			OwnedBy: "cursor2api",
+		}
+
+		// 如果找到模型配置，添加max_tokens和context_window信息
+		if exists {
+			model.MaxTokens = modelConfig.MaxTokens
+			model.ContextWindow = modelConfig.ContextWindow
+		}
+
+		modelList = append(modelList, model)
+	}
+
+	response := models.ModelsResponse{
+		Object: "list",
+		Data:   modelList,
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// ChatCompletions 处理聊天完成请求
+func (h *Handler) ChatCompletions(c *gin.Context) {
+	var request models.ChatCompletionRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		logrus.WithError(err).Error("Failed to bind request")
+		c.JSON(http.StatusBadRequest, models.NewErrorResponse(
+			"Invalid request format",
+			"invalid_request_error",
+			"invalid_json",
+		))
 		return
 	}
 
-	// 读取并返回文档文件
-	c.File(docsPath)
+	// 验证模型
+	if !h.config.IsValidModel(request.Model) {
+		c.JSON(http.StatusBadRequest, models.NewErrorResponse(
+			"Invalid model specified",
+			"invalid_request_error",
+			"model_not_found",
+		))
+		return
+	}
+
+	// 验证消息
+	if len(request.Messages) == 0 {
+		c.JSON(http.StatusBadRequest, models.NewErrorResponse(
+			"Messages cannot be empty",
+			"invalid_request_error",
+			"missing_messages",
+		))
+		return
+	}
+
+	// 验证并调整max_tokens参数
+	request.MaxTokens = models.ValidateMaxTokens(request.Model, request.MaxTokens)
+
+	// 调用Cursor服务
+	// 根据是否流式返回不同响应
+	if request.Stream {
+		chatGenerator, err := h.cursorService.ChatCompletion(c.Request.Context(), &request)
+		if err != nil {
+			logrus.WithError(err).Error("Failed to create chat completion")
+			middleware.HandleError(c, err)
+			return
+		}
+		utils.SafeStreamWrapper(utils.StreamChatCompletion, c, chatGenerator, request.Model)
+	} else {
+		resp, err := h.cursorService.ChatCompletionNonStream(c.Request.Context(), &request)
+		if err != nil {
+			logrus.WithError(err).Error("Failed to create non-stream chat completion")
+			middleware.HandleError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, resp)
+	}
+}
+
+// ServeDocs 服务API文档页面
+func (h *Handler) ServeDocs(c *gin.Context) {
+	c.Data(http.StatusOK, "text/html; charset=utf-8", h.docsContent)
 }
 
 // Health 健康检查
